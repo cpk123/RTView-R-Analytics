@@ -1,13 +1,14 @@
 ##############################################################################
 #   Example R code for "Analytics with RTView Data using R"
 ##############################################################################
+library(xts)
 
 #  getCurrent queries the RTView REST interface for current data from the given cache.
 #
-#getCurrent("localhost:8068","VmwVirtualMachines",package="hostbase_rtvquery")
+#getCacheCurrent("localhost:8068","VmwVirtualMachines",rtvquery="hostbase_rtvquery")
 
-getCacheCurrent <- function(rtvServer, cache, package="emsample_rtvquery", fmt="text", cols="") {
-	url <- sprintf("http://%s/%s/cache/%s/current?fmt=%s",rtvServer,package,cache,fmt)
+getCacheCurrent <- function(rtvServer, cache, rtvquery="emsample_rtvquery", fmt="text", cols="") {
+	url <- sprintf("http://%s/%s/cache/%s/current?fmt=%s",rtvServer,rtvquery,cache,fmt)
 	if( cols != "" )  url <- sprintf("%s&cols=%s",url,cols)
 	print(url)
 	read.delim(url)     # execute REST query; returns an R dataframe
@@ -44,8 +45,8 @@ getCacheCurrent <- function(rtvServer, cache, package="emsample_rtvquery", fmt="
 #
 getCacheHistory <- function(rtvServer, cache="EmsQueueTotalsByServer", 
 						rtvquery="emsample_rtvquery", fval, fcol="URL", 
-						dayOffset=6, secOffset=0, sides=2, ndays=1, tz_offset=8,
-						cols="time_stamp", fmt="text", tr=86400) {
+						dayOffset=0, secOffset=0, sides=2, ndays=0, tz_offset=8,
+						cols="time_stamp", fmt="text", tr=86400, agg=1) {
     # set up the base URL for the REST query
     base_url <- sprintf("http://%s/%s/cache/%s/history?fmt=%s&cols=%s",rtvServer,rtvquery,cache,fmt,cols)
 	# create a column filter to retrieve rows for a specified index value
@@ -59,29 +60,42 @@ getCacheHistory <- function(rtvServer, cache="EmsQueueTotalsByServer",
         #timeFilter <- sprintf("tr=%s&te=%s000",tr,te)
         print("set tr only")
     } else {
-        tb <- (unclass(Sys.Date()) - dayOffset)*86400 - secOffset + tz_offset*3600
+        tb <- (unclass(Sys.Date()) - dayOffset)*86400 + secOffset + tz_offset*3600
         trr <- tr * ndays + sides*secOffset
         timeFilter <- sprintf("tr=%s&tb=%s000",trr,tb)
     }
 
     url <- URLencode(paste(base_url,emsFilter,timeFilter,"sqlex=true",sep="&"))
-    #print(paste(">>>fetching URL: ",url))        # debug
+    # print(paste(">>>fetching URL: ",url))        # debug
     ret <- read.delim(url, sep="\t")     # execute REST query; returns an R dataframe
     num_rows <- nrow(ret)
-    if (num_rows != 0) {
-        ret$time_stamp <- as.POSIXct(ret$time_stamp,"%b %d, %Y %I:%M:%S %p",tz="GMT")
-        delta <- as.numeric(difftime(ret$time_stamp[2],ret$time_stamp[1],units="secs"))
-        end_delta <- as.numeric(difftime(ret$time_stamp[num_rows],ret$time_stamp[num_rows-1],units="secs"))
+    if (num_rows > 1) {
+        #ret$time_stamp <- as.POSIXct(ret$time_stamp,"%b %d, %Y %I:%M:%S %p",tz="GMT")
+        #delta <- as.numeric(difftime(ret$time_stamp[2],ret$time_stamp[1],units="secs"))
+        #end_delta <- as.numeric(difftime(ret$time_stamp[num_rows],ret$time_stamp[num_rows-1],units="secs"))
+        ret <- xts(ret[,2:ncol(ret)], order.by=as.POSIXct(ret$time_stamp,format="%b %d, %Y %I:%M:%S %p",tz="GMT"))
+        #ret <- xts(ret, order.by=as.POSIXct(ret$time_stamp,format="%b %d, %Y %I:%M:%S %p",tz="GMT"))
+        ret_times <- index(ret)
+        delta <- as.numeric(difftime(ret_times[2],ret_times[1],units="secs"))
+        end_delta <- as.numeric(difftime(ret_times[num_rows],ret_times[num_rows-1],units="secs"))
         if (floor(delta/end_delta) > 1) {
-            #aggregate samples at lower sample spacing than last pair of samples
-            print("*** getCacheHistory: need to aggregate part of return data")
+            #aggregate samples at lower sample spacing than oldest pair of samples
+            #print("*** getCacheHistory: need to aggregate part of return data")
+            #ret <- to.minutes5(ret,OHLC=FALSE) # this doesnt give desired timestamps
+            
+            ret$indx <- floor((ret_times-ret_times[1])/delta)
+            ret.agg <- aggregate(coredata(ret),by=list(ret$indx),FUN=mean)
+            num_rows <- nrow(ret.agg)
+            #xts(ret.agg,order.by=(ret_times[1]+delta*(0:(length(ret.agg$indx)-1))))[,c(-1,-ncol(ret.agg))]
+            ret <- ret.agg[,c(-1,-ncol(ret.agg))]
         }
-        delta_t <- floor(as.numeric(difftime(ret$time_stamp[num_rows],ret$time_stamp[1],units="secs"))/(num_rows-1))
-        this.frequency <- floor(86400/delta_t)  # calculate number of samples per day
-        #print(delta_t)
-        #print(this.frequency)
-        ts(ret[,-1], start=getTsTime(ret$time_stamp[1],delta_t), end=getTsTime(ret$time_stamp[1],delta_t,num_rows),
-            frequency=this.frequency, deltat=delta_t)
+        #else {
+        #delta_t <- floor(as.numeric(difftime(ret$time_stamp[num_rows],ret$time_stamp[1],units="secs"))/(num_rows-1))
+        this.frequency <- floor(86400/delta)  # calculate number of samples per day
+        #ts(ret[,-1], start=getTsTime(ret$time_stamp[1],delta), end=getTsTime(ret$time_stamp[1],delta,num_rows),
+        ts(ret, start=getTsTime(ret_times[1],delta), end=getTsTime(ret_times[1],delta,num_rows),
+            frequency=this.frequency, deltat=delta)
+        #}
     }
     else {
         print("*** getCacheHistory: RTView query returned no data")
